@@ -1,36 +1,98 @@
 import 'dart:convert';
-import 'package:crypto/crypto.dart';
+import 'package:http/http.dart' as http;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 class AuthService {
   final _secureStorage = const FlutterSecureStorage();
+  final String _baseUrl = dotenv.env['BACKEND_URL'] ?? 'http://127.0.0.1:8000';
 
-  // 1. Cek apakah ini pertama kali aplikasi dibuka (brankas kosong)
-  Future<bool> isFirstRun() async {
-    final validHash = await _secureStorage.read(key: 'saved_hash');
-    return validHash == null;
-  }
-
-  // 2. Fungsi untuk mengatur kredensial pertama kali (Tanpa Hardcode)
-  Future<void> registerAdmin(String username, String password) async {
-    final bytes = utf8.encode(password);
-    final hash = sha256.convert(bytes).toString();
-
-    await _secureStorage.write(key: 'saved_username', value: username);
-    await _secureStorage.write(key: 'saved_hash', value: hash);
-  }
-
-  // 3. Fungsi login murni, akan gagal jika kredensial tidak cocok
+  // 1. FUNGSI LOGIN (Menyimpan 2 jenis token)
   Future<bool> login(String username, String password) async {
-    final bytes = utf8.encode(password);
-    final inputHash = sha256.convert(bytes).toString();
+    try {
+      final response = await http.post(
+        Uri.parse('$_baseUrl/auth/login'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'username': username, 'password': password}),
+      );
 
-    final validUser = await _secureStorage.read(key: 'saved_username');
-    final validHash = await _secureStorage.read(key: 'saved_hash');
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        
+        // Simpan access_token dan refresh_token ke brankas
+        await _secureStorage.write(key: 'access_token', value: data['access_token']);
+        await _secureStorage.write(key: 'refresh_token', value: data['refresh_token']);
+        return true;
+      }
+      return false;
+    } catch (e) {
+      return false;
+    }
+  }
 
-    if (username == validUser && inputHash == validHash) return true;
+  // 2. MENGAMBIL ACCESS TOKEN (Digunakan oleh ApiService)
+  Future<String?> getToken() async {
+    return await _secureStorage.read(key: 'access_token');
+  }
+
+  // --- FUNGSI BARU: MENUKAR REFRESH TOKEN ---
+  Future<bool> refreshToken() async {
+    final refreshTokenStr = await _secureStorage.read(key: 'refresh_token');
     
-    await Future.delayed(const Duration(seconds: 2)); // Anti Brute-Force
-    return false;
+    // Jika tidak ada refresh token di memori, otomatis gagal
+    if (refreshTokenStr == null) return false;
+
+    try {
+      final response = await http.post(
+        Uri.parse('$_baseUrl/auth/refresh'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'refresh_token': refreshTokenStr}),
+      );
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        
+        // Simpan pasangan token yang baru didapat ke brankas
+        await _secureStorage.write(key: 'access_token', value: data['access_token']);
+        await _secureStorage.write(key: 'refresh_token', value: data['refresh_token']);
+        return true; // Berhasil memperbarui sesi
+      }
+      
+      return false; // Gagal (Refresh token sudah > 1 hari atau di-blacklist)
+    } catch (e) {
+      return false; // Gagal karena masalah jaringan
+    }
+  }
+
+  // 3. FUNGSI LOGOUT (Memberi tahu server untuk menghancurkan token)
+  Future<void> logout() async {
+    final accessToken = await _secureStorage.read(key: 'access_token');
+    final refreshToken = await _secureStorage.read(key: 'refresh_token');
+
+    // Jika token masih ada, kirim request ke backend untuk diblacklist
+    if (accessToken != null && refreshToken != null) {
+      try {
+        await http.post(
+          Uri.parse('$_baseUrl/auth/logout'),
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer $accessToken',
+          },
+          body: jsonEncode({'refresh_token': refreshToken}),
+        );
+      } catch (e) {
+        // Abaikan jika gagal koneksi, yang penting token lokal tetap dihapus
+      }
+    }
+
+    // Hapus kedua token dari memori HP
+    await _secureStorage.delete(key: 'access_token');
+    await _secureStorage.delete(key: 'refresh_token');
+  }
+
+  // Cek sesi
+  Future<bool> isLoggedIn() async {
+    final token = await getToken();
+    return token != null;
   }
 }

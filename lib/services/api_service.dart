@@ -1,49 +1,49 @@
 import 'dart:convert';
-import 'dart:io';
+import 'package:http/http.dart' as http;
 import 'package:flutter_dotenv/flutter_dotenv.dart';
-import 'package:http/io_client.dart';
+import 'auth_service.dart';
 
 class ApiService {
+  // Variabel public agar authService bisa diakses dari file lain (seperti home_page.dart)
+  final authService = AuthService();
+  
+  // Mengambil URL backend dari file .env
+  final String _baseUrl = dotenv.env['BACKEND_URL'] ?? 'http://127.0.0.1:8000';
+
   Future<Map<String, dynamic>> search(String query) async {
-    final sanitizedQuery = query.replaceAll(RegExp(r'[^a-zA-Z0-9\.\-\_]'), '');
-    final url = Uri.parse('https://www.virustotal.com/api/v3/search?query=$sanitizedQuery');
+    // 1. Ambil Access Token dari penyimpanan lokal
+    final token = await authService.getToken();
     
-    // Memanggil API Key
-    final apiKey = dotenv.env['VT_API_KEY'] ?? '';
+    // Jika tidak ada token, langsung lempar error agar UI mengarahkan ke halaman login
+    if (token == null) {
+      throw Exception('UNAUTHORIZED'); 
+    }
 
-    // 1. Matikan semua sertifikat bawaan OS Android
-    SecurityContext securityContext = SecurityContext(withTrustedRoots: false);
-    HttpClient httpClient = HttpClient(context: securityContext);
-
-    // ==========================================
-    // STRATEGI BARU: CALLBACK SSL PINNING
-    // ==========================================
-    // Menangkap sertifikat yang ditolak OS dan melakukan inspeksi manual
-    httpClient.badCertificateCallback = (X509Certificate cert, String host, int port) {
-      // VirusTotal diamankan secara resmi oleh Google
-      final bool isVirusTotalHost = host == 'www.virustotal.com';
-      final bool isTrustedIssuer = cert.issuer.contains('Google Trust Services');
-      
-      // Jika Host dan Penerbitnya benar, izinkan koneksi
-      if (isVirusTotalHost && isTrustedIssuer) {
-        return true; 
-      }
-      
-      // Jika BurpSuite mencoba masuk, Issuer akan berubah menjadi PortSwigger
-      // Aplikasi akan merespons dengan false (Koneksi Ditolak)
-      return false; 
-    };
-
-    IOClient secureClient = IOClient(httpClient);
-
-    final response = await secureClient.get(
+    // Membersihkan input kueri dari karakter yang tidak diinginkan
+    final sanitizedQuery = query.replaceAll(RegExp(r'[^a-zA-Z0-9\.\-\_]'), '');
+    
+    // 2. Tembak ke endpoint pencarian di server Python lokal
+    final url = Uri.parse('$_baseUrl/api/search?query=$sanitizedQuery');
+         
+    final response = await http.get(
       url,
-      headers: {'x-apikey': apiKey, 'Accept': 'application/json'},
+      headers: {
+        'Authorization': 'Bearer $token', // Membawa token JWT untuk verifikasi sesi
+        'Accept': 'application/json'
+      },
     );
 
+    // 3. Tangani respons dari server
     if (response.statusCode == 200) {
       return jsonDecode(response.body);
     }
+    
+    // Jika server Python menolak karena token kedaluwarsa atau tidak valid
+    if (response.statusCode == 401) {
+       throw Exception('UNAUTHORIZED'); 
+    }
+    
+    // Untuk error lainnya (seperti 500 Internal Server Error, dll)
     throw Exception('Status HTTP: ${response.statusCode}');
   }
 }

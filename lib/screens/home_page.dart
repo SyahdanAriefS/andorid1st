@@ -20,17 +20,44 @@ class _HomePageState extends State<HomePage> {
   void _search() async {
     if (_searchController.text.trim().isEmpty) return;
     setState(() { _isLoading = true; _errorMessage = ''; _scanResult = null; });
-
+    
     try {
+      // Memanggil fungsi pencarian di ApiService
       final result = await _apiService.search(_searchController.text);
       setState(() => _scanResult = result);
     } catch (e) {
-      print('=== DEBUG JARINGAN ===');
-      print(e.toString());
-      print('======================');
-      setState(() => _errorMessage = 'Error: $e');
+      // JIKA TOKEN KEDALUWARSA (DITOLAK SERVER)
+      if (e.toString().contains('UNAUTHORIZED')) {
+        
+        // 1. Coba perbarui token secara diam-diam di latar belakang
+        final refreshSuccess = await _apiService.authService.refreshToken();
+        
+        if (refreshSuccess) {
+          // 2a. Jika BERHASIL, langsung ulangi pencarian tanpa sepengetahuan user!
+          _search(); 
+          return; // Hentikan eksekusi yang gagal ini
+        } else {
+          // 2b. Jika GAGAL (Sesi 1 hari sudah habis / token diblacklist server)
+          await _apiService.authService.logout(); 
+          
+          if (!mounted) return;
+          // Tendang pengguna ke halaman login
+          Navigator.pushAndRemoveUntil(
+            context,
+            MaterialPageRoute(builder: (context) => const LoginPage()),
+            (route) => false,
+          );
+          
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Sesi Anda telah benar-benar berakhir. Silakan login kembali.')),
+          );
+        }
+      } else {
+        // Jika errornya bukan masalah token (misal: internet putus)
+        setState(() => _errorMessage = 'Error: $e');
+      }
     } finally {
-      setState(() => _isLoading = false);
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
@@ -38,13 +65,26 @@ class _HomePageState extends State<HomePage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('VirusTotal Scanner'),
-        actions: [
-          IconButton(icon: const Icon(Icons.logout), onPressed: () => 
-            Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const LoginPage())))
-        ],
-      ),
-      body: Padding(
+  title: const Text('VirusTotal Scanner'),
+  actions: [
+    IconButton(
+      icon: const Icon(Icons.logout), 
+      onPressed: () async {
+        // 1. Tampilkan indikator loading (opsional) atau langsung panggil fungsi logout
+        // Ini akan mengirimkan POST /auth/logout ke server Python Anda
+        await _apiService.authService.logout();
+
+        if (!context.mounted) return;
+
+        // 2. Setelah token dihancurkan di server dan lokal, pindah ke halaman login
+        Navigator.pushReplacement(
+          context, 
+          MaterialPageRoute(builder: (context) => const LoginPage()),
+        );
+      },
+    )
+  ],
+),      body: Padding(
         padding: const EdgeInsets.all(16.0),
         child: Column(
           children: [
